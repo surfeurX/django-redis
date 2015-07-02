@@ -28,10 +28,10 @@ class BaseSerializer(object):
         pass
 
     def dumps(self, value):
-        raise NotImplementedError
+        return value
 
     def loads(self, value):
-        raise NotImplementedError
+        return value
 
 
 class PickleSerializer(BaseSerializer):
