@@ -5,23 +5,19 @@ from __future__ import absolute_import, unicode_literals
 import re
 from collections import OrderedDict
 
+from django.conf import settings
+from django.utils.encoding import smart_text
+from django.utils.six import text_type
 from redis.exceptions import ConnectionError
 
-from django.conf import settings
-
-try:
-    from django.utils.encoding import smart_text
-except ImportError:
-    from django.utils.encoding import smart_unicode as smart_text
-
-from ..hash_ring import HashRing
 from ..exceptions import ConnectionInterrupted
+from ..hash_ring import HashRing
 from ..util import CacheKey
-from .default import DefaultClient, DEFAULT_TIMEOUT
+from .default import DEFAULT_TIMEOUT, DefaultClient
 
 
 class ShardClient(DefaultClient):
-    _findhash = re.compile('.*\{(.*)\}.*', re.I)
+    _findhash = re.compile(r'.*\{(.*)\}.*', re.I)
 
     def __init__(self, *args, **kwargs):
         super(ShardClient, self).__init__(*args, **kwargs)
@@ -42,7 +38,7 @@ class ShardClient(DefaultClient):
         return connection_dict
 
     def get_server_name(self, _key):
-        key = str(_key)
+        key = text_type(_key)
         g = self._findhash.match(key)
         if g is not None and len(g.groups()) > 0:
             key = g.groups()[0]
@@ -122,7 +118,7 @@ class ShardClient(DefaultClient):
 
         key = self.make_key(key, version=version)
         try:
-            return client.exists(key)
+            return client.exists(key) == 1
         except ConnectionError:
             raise ConnectionInterrupted(connection=client)
 
@@ -132,6 +128,44 @@ class ShardClient(DefaultClient):
             client = self.get_server(key)
 
         return super(ShardClient, self).delete(key=key, version=version, client=client)
+
+    def ttl(self, key, version=None, client=None):
+        """
+        Executes TTL redis command and return the "time-to-live" of specified key.
+        If key is a non volatile key, it returns None.
+        """
+
+        if client is None:
+            key = self.make_key(key, version=version)
+            client = self.get_server(key)
+
+        return super(ShardClient, self).ttl(key=key, version=version, client=client)
+
+    def persist(self, key, version=None, client=None):
+        if client is None:
+            key = self.make_key(key, version=version)
+            client = self.get_server(key)
+
+        return super(ShardClient, self).persist(key=key, version=version, client=client)
+
+    def expire(self, key, timeout, version=None, client=None):
+        if client is None:
+            key = self.make_key(key, version=version)
+            client = self.get_server(key)
+
+        return super(ShardClient, self).expire(key=key, timeout=timeout,
+                                               version=version, client=client)
+
+    def lock(self, key, version=None, timeout=None, sleep=0.1,
+             blocking_timeout=None, client=None):
+
+        if client is None:
+            key = self.make_key(key, version=version)
+            client = self.get_server(key)
+
+        key = self.make_key(key, version=version)
+        return super(ShardClient, self).lock(key, timeout=timeout, sleep=sleep, client=client,
+                                             blocking_timeout=blocking_timeout)
 
     def delete_many(self, keys, version=None):
         """
@@ -204,16 +238,18 @@ class ShardClient(DefaultClient):
         decoded_keys = (smart_text(k) for k in keys)
         return [self.reverse_key(k) for k in decoded_keys]
 
-    def delete_pattern(self, pattern, version=None):
+    def delete_pattern(self, pattern, version=None, client=None, itersize=None, prefix=None):
         """
         Remove all keys matching pattern.
         """
-
-        pattern = self.make_key(pattern, version=version)
+        pattern = self.make_pattern(pattern, version=version, prefix=prefix)
+        kwargs = {'match': pattern}
+        if itersize:
+            kwargs['count'] = itersize
 
         keys = []
         for server, connection in self._serverdict.items():
-            keys.extend([key for key in connection.scan_iter(pattern)])
+            keys.extend(key for key in connection.scan_iter(**kwargs))
 
         res = 0
         if keys:
@@ -226,3 +262,11 @@ class ShardClient(DefaultClient):
             for client in self._serverdict.values():
                 for c in client.connection_pool._available_connections:
                     c.disconnect()
+
+    def touch(self, key, timeout=DEFAULT_TIMEOUT, version=None, client=None):
+        if client is None:
+            key = self.make_key(key, version=version)
+            client = self.get_server(key)
+
+        return super(ShardClient, self).touch(key=key, timeout=timeout,
+                                              version=version, client=client)

@@ -1,15 +1,17 @@
 # -*- coding: utf-8 -*-
 
 import random
+import socket
 import time
 from collections import OrderedDict
 
-from redis.exceptions import ConnectionError
-
 from django.conf import settings
+from redis.exceptions import ConnectionError, ResponseError, TimeoutError
 
-from .default import DEFAULT_TIMEOUT, DefaultClient
 from ..exceptions import ConnectionInterrupted
+from .default import DEFAULT_TIMEOUT, DefaultClient
+
+_main_exceptions = (ConnectionError, ResponseError, TimeoutError, socket.timeout)
 
 
 class Marker(object):
@@ -39,8 +41,7 @@ class HerdClient(DefaultClient):
         super(HerdClient, self).__init__(*args, **kwargs)
 
     def _pack(self, value, timeout):
-        herd_timeout = ((timeout or self._backend.default_timeout)
-                        + int(time.time()))
+        herd_timeout = (timeout or self._backend.default_timeout) + int(time.time())
         return (self._marker, value, herd_timeout)
 
     def _unpack(self, value):
@@ -101,8 +102,8 @@ class HerdClient(DefaultClient):
 
         try:
             results = client.mget(*new_keys)
-        except ConnectionError:
-            raise ConnectionInterrupted(connection=client)
+        except _main_exceptions as e:
+            raise ConnectionInterrupted(connection=client, parent=e)
 
         for key, value in zip(new_keys, results):
             if value is None:
@@ -132,8 +133,8 @@ class HerdClient(DefaultClient):
             for key, value in data.items():
                 set_function(key, value, timeout, version=version, client=pipeline)
             pipeline.execute()
-        except ConnectionError:
-            raise ConnectionInterrupted(connection=client)
+        except _main_exceptions as e:
+            raise ConnectionInterrupted(connection=client, parent=e)
 
     def incr(self, *args, **kwargs):
         raise NotImplementedError()

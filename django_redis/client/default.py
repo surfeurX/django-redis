@@ -3,39 +3,30 @@
 from __future__ import absolute_import, unicode_literals
 
 import random
+import re
 import socket
-import warnings
-import zlib
 from collections import OrderedDict
 
-try:
-    from django.utils.encoding import smart_text
-except ImportError:
-    from django.utils.encoding import smart_unicode as smart_text
-
 from django.conf import settings
-from django.core.cache.backends.base import get_key_func
+from django.core.cache.backends.base import DEFAULT_TIMEOUT, get_key_func
 from django.core.exceptions import ImproperlyConfigured
+from django.utils import six
+from django.utils.encoding import smart_text
+from django.utils.module_loading import import_string
+from redis.exceptions import ConnectionError, ResponseError, TimeoutError
 
-try:
-    from django.core.cache.backends.base import DEFAULT_TIMEOUT
-except ImportError:
-    DEFAULT_TIMEOUT = object()
-
-from redis.exceptions import ConnectionError
-from redis.exceptions import ResponseError
-
-# Compatibility with redis-py 2.10.x+
-
-try:
-    from redis.exceptions import TimeoutError
-    _main_exceptions = (TimeoutError, ConnectionError, socket.timeout)
-except ImportError:
-    _main_exceptions = (ConnectionError, socket.timeout)
-
-from ..util import CacheKey, load_class, integer_types
-from ..exceptions import ConnectionInterrupted
 from .. import pool
+from ..exceptions import CompressorError, ConnectionInterrupted
+from ..util import CacheKey
+
+_main_exceptions = (TimeoutError, ResponseError, ConnectionError, socket.timeout)
+
+
+special_re = re.compile('([*?[])')
+
+
+def glob_escape(s):
+    return special_re.sub(r'[\1]', s)
 
 
 class DefaultClient(object):
@@ -44,8 +35,9 @@ class DefaultClient(object):
         self._server = server
         self._params = params
 
-        self.reverse_key = get_key_func(params.get("REVERSE_KEY_FUNCTION") or
-                                        "django_redis.util.default_reverse_key")
+        self.reverse_key = get_key_func(
+            params.get("REVERSE_KEY_FUNCTION") or "django_redis.util.default_reverse_key"
+        )
 
         if not self._server:
             raise ImproperlyConfigured("Missing connections string")
@@ -55,19 +47,23 @@ class DefaultClient(object):
 
         self._clients = [None] * len(self._server)
         self._options = params.get("OPTIONS", {})
-        self._options.setdefault("COMPRESS_COMPRESSOR", zlib.compress)
-        self._options.setdefault("COMPRESS_DECOMPRESSOR", zlib.decompress)
-        self._options.setdefault("COMPRESS_DECOMPRESSOR_ERROR", zlib.error)
+        self._slave_read_only = self._options.get('SLAVE_READ_ONLY', True)
 
         serializer_path = self._options.get("SERIALIZER", "django_redis.serializers.pickle.PickleSerializer")
-        serializer_cls = load_class(serializer_path)
+        serializer_cls = import_string(serializer_path)
+
+        compressor_path = self._options.get("COMPRESSOR", "django_redis.compressors.identity.IdentityCompressor")
+        compressor_cls = import_string(compressor_path)
+
         self._serializer = serializer_cls(options=self._options)
+        self._compressor = compressor_cls(options=self._options)
+
         self.connection_factory = pool.get_connection_factory(options=self._options)
 
     def __contains__(self, key):
         return self.has_key(key)
 
-    def get_next_client_index(self, write=True):
+    def get_next_client_index(self, write=True, tried=()):
         """
         Return a next index for read client.
         This function implements a default behavior for
@@ -76,12 +72,16 @@ class DefaultClient(object):
         Overwrite this function if you want a specific
         behavior.
         """
+        if tried and len(tried) < len(self._server):
+            not_tried = [i for i in range(0, len(self._server)) if i not in tried]
+            return random.choice(not_tried)
+
         if write or len(self._server) == 1:
             return 0
 
         return random.randint(1, len(self._server) - 1)
 
-    def get_client(self, write=True):
+    def get_client(self, write=True, tried=(), show_index=False):
         """
         Method used for obtain a raw redis client.
 
@@ -89,12 +89,15 @@ class DefaultClient(object):
         operations for obtain a native redis client/connection
         instance.
         """
-        index = self.get_next_client_index(write=write)
+        index = self.get_next_client_index(write=write, tried=tried or [])
 
         if self._clients[index] is None:
             self._clients[index] = self.connect(index)
 
-        return self._clients[index]
+        if show_index:
+            return self._clients[index], index
+        else:
+            return self._clients[index]
 
     def connect(self, index=0):
         """
@@ -109,39 +112,42 @@ class DefaultClient(object):
         Persist a value to the cache, and set an optional expiration time.
         Also supports optional nx parameter. If set to True - will use redis setnx instead of set.
         """
-
-        if not client:
-            client = self.get_client(write=True)
-
         nkey = self.make_key(key, version=version)
         nvalue = self.encode(value)
-
-        if timeout is True:
-            warnings.warn("Using True as timeout value, is now deprecated.", DeprecationWarning)
-            timeout = self._backend.default_timeout
 
         if timeout == DEFAULT_TIMEOUT:
             timeout = self._backend.default_timeout
 
-        try:
-            if timeout is not None:
-                if timeout > 0:
-                    timeout = int(timeout)
-                elif timeout <= 0:
-                    if nx:
-                        # Using negative timeouts when nx is True should
-                        # not expire (in our case delete) the value if it exists.
-                        # Obviously expire not existent value is noop.
-                        timeout = None
-                    else:
-                        # redis doesn't support negative timeouts in ex flags
-                        # so it seems that it's better to just delete the key
-                        # than to set it and than expire in a pipeline
-                        return self.delete(key, client=client, version=version)
+        original_client = client
+        tried = []
+        while True:
+            try:
+                if not client:
+                    client, index = self.get_client(write=True, tried=tried, show_index=True)
 
-            return client.set(nkey, nvalue, nx=nx, ex=timeout, xx=xx)
-        except _main_exceptions as e:
-            raise ConnectionInterrupted(connection=client, parent=e)
+                if timeout is not None:
+                    # Convert to milliseconds
+                    timeout = int(timeout * 1000)
+
+                    if timeout <= 0:
+                        if nx:
+                            # Using negative timeouts when nx is True should
+                            # not expire (in our case delete) the value if it exists.
+                            # Obviously expire not existent value is noop.
+                            return not self.has_key(key, version=version, client=client)
+                        else:
+                            # redis doesn't support negative timeouts in ex flags
+                            # so it seems that it's better to just delete the key
+                            # than to set it and than expire in a pipeline
+                            return self.delete(key, client=client, version=version)
+
+                return client.set(nkey, nvalue, nx=nx, px=timeout, xx=xx)
+            except _main_exceptions as e:
+                if not original_client and not self._slave_read_only and len(tried) < len(self._server):
+                    tried.append(index)
+                    client = None
+                    continue
+                raise ConnectionInterrupted(connection=client, parent=e)
 
     def incr_version(self, key, delta=1, version=None, client=None):
         """
@@ -204,7 +210,34 @@ class DefaultClient(object):
 
         return self.decode(value)
 
-    def delete(self, key, version=None, client=None):
+    def persist(self, key, version=None, client=None):
+        if client is None:
+            client = self.get_client(write=True)
+
+        key = self.make_key(key, version=version)
+
+        if client.exists(key):
+            client.persist(key)
+
+    def expire(self, key, timeout, version=None, client=None):
+        if client is None:
+            client = self.get_client(write=True)
+
+        key = self.make_key(key, version=version)
+
+        if client.exists(key):
+            client.expire(key, timeout)
+
+    def lock(self, key, version=None, timeout=None, sleep=0.1,
+             blocking_timeout=None, client=None):
+        if client is None:
+            client = self.get_client(write=True)
+
+        key = self.make_key(key, version=version)
+        return client.lock(key, timeout=timeout, sleep=sleep,
+                           blocking_timeout=blocking_timeout)
+
+    def delete(self, key, version=None, prefix=None, client=None):
         """
         Remove a key from the cache.
         """
@@ -212,11 +245,12 @@ class DefaultClient(object):
             client = self.get_client(write=True)
 
         try:
-            return client.delete(self.make_key(key, version=version))
+            return client.delete(self.make_key(key, version=version,
+                                               prefix=prefix))
         except _main_exceptions as e:
             raise ConnectionInterrupted(connection=client, parent=e)
 
-    def delete_pattern(self, pattern, version=None, client=None):
+    def delete_pattern(self, pattern, version=None, prefix=None, client=None, itersize=None):
         """
         Remove all keys matching pattern.
         """
@@ -224,10 +258,15 @@ class DefaultClient(object):
         if client is None:
             client = self.get_client(write=True)
 
-        pattern = self.make_key(pattern, version=version)
+        pattern = self.make_pattern(pattern, version=version, prefix=prefix)
+
+        kwargs = {'match': pattern, }
+        if itersize:
+            kwargs['count'] = itersize
+
         try:
             count = 0
-            for key in client.scan_iter(pattern):
+            for key in client.scan_iter(**kwargs):
                 client.delete(key)
                 count += 1
             return count
@@ -242,10 +281,11 @@ class DefaultClient(object):
         if client is None:
             client = self.get_client(write=True)
 
+        keys = [self.make_key(k, version=version) for k in keys]
+
         if not keys:
             return
 
-        keys = [self.make_key(k, version=version) for k in keys]
         try:
             return client.delete(*keys)
         except _main_exceptions as e:
@@ -255,10 +295,14 @@ class DefaultClient(object):
         """
         Flush all cache keys.
         """
+
         if client is None:
             client = self.get_client(write=True)
 
-        client.flushdb()
+        try:
+            client.flushdb()
+        except _main_exceptions as e:
+            raise ConnectionInterrupted(connection=client, parent=e)
 
     def decode(self, value):
         """
@@ -267,12 +311,11 @@ class DefaultClient(object):
         try:
             value = int(value)
         except (ValueError, TypeError):
-            if self._options.get("COMPRESS_MIN_LEN", 0) > 0:
-                try:
-                    value = self._options["COMPRESS_DECOMPRESSOR"](value)
-                except self._options["COMPRESS_DECOMPRESSOR_ERROR"]:
-                    # Handle little values, chosen to be not compressed
-                    pass
+            try:
+                value = self._compressor.decompress(value)
+            except CompressorError:
+                # Handle little values, chosen to be not compressed
+                pass
             value = self._serializer.loads(value)
         return value
 
@@ -281,16 +324,10 @@ class DefaultClient(object):
         Encode the given value.
         """
 
-        if isinstance(value, bool) or not isinstance(value, integer_types):
-            encoded_value = self._serializer.dumps(value)
-            if self._options.get("COMPRESS_MIN_LEN", 0) > 0:
-                if len(encoded_value) >= self._options["COMPRESS_MIN_LEN"]:
-                    # We should try to compress if COMPRESS_MIN_LEN > 0
-                    # and this string is longer than our min threshold.
-                    compressed = self._options["COMPRESS_COMPRESSOR"](encoded_value)
-                    if len(compressed) < len(encoded_value):
-                        encoded_value = compressed
-            return encoded_value
+        if isinstance(value, bool) or not isinstance(value, six.integer_types):
+            value = self._serializer.dumps(value)
+            value = self._compressor.compress(value)
+            return value
 
         return value
 
@@ -307,15 +344,16 @@ class DefaultClient(object):
 
         recovered_data = OrderedDict()
 
-        new_keys = [self.make_key(k, version=version) for k in keys]
-        map_keys = dict(zip(new_keys, keys))
+        map_keys = OrderedDict(
+            (self.make_key(k, version=version), k) for k in keys
+        )
 
         try:
-            results = client.mget(*new_keys)
+            results = client.mget(*map_keys)
         except _main_exceptions as e:
             raise ConnectionInterrupted(connection=client, parent=e)
 
-        for key, value in zip(new_keys, results):
+        for key, value in zip(map_keys, results):
             if value is None:
                 continue
             recovered_data[map_keys[key]] = self.decode(value)
@@ -340,18 +378,31 @@ class DefaultClient(object):
         except _main_exceptions as e:
             raise ConnectionInterrupted(connection=client, parent=e)
 
-    def _incr(self, key, delta=1, version=None, client=None):
+    def _incr(self, key, delta=1, version=None, client=None, ignore_key_check=False):
         if client is None:
             client = self.get_client(write=True)
 
         key = self.make_key(key, version=version)
 
         try:
-            if not client.exists(key):
-                raise ValueError("Key '%s' not found" % key)
-
             try:
-                value = client.incr(key, delta)
+                # if key expired after exists check, then we get
+                # key with wrong value and ttl -1.
+                # use lua script for atomicity
+                if not ignore_key_check:
+                    lua = """
+                    local exists = redis.call('EXISTS', KEYS[1])
+                    if (exists == 1) then
+                        return redis.call('INCRBY', KEYS[1], ARGV[1])
+                    else return false end
+                    """
+                else:
+                    lua = """
+                    return redis.call('INCRBY', KEYS[1], ARGV[1])
+                    """
+                value = client.eval(lua, 1, key, delta)
+                if value is None:
+                    raise ValueError("Key '%s' not found" % key)
             except ResponseError:
                 # if cached value or total value is greater than 64 bit signed
                 # integer.
@@ -359,7 +410,12 @@ class DefaultClient(object):
                 # In this situations redis will throw ResponseError
 
                 # try to keep TTL of key
+
                 timeout = client.ttl(key)
+                # returns -2 if the key does not exist
+                # means, that key have expired
+                if timeout == -2:
+                    raise ValueError("Key '%s' not found" % key)
                 value = self.get(key, version=version, client=client) + delta
                 self.set(key, value, version=version, timeout=timeout,
                          client=client)
@@ -368,12 +424,13 @@ class DefaultClient(object):
 
         return value
 
-    def incr(self, key, delta=1, version=None, client=None):
+    def incr(self, key, delta=1, version=None, client=None, ignore_key_check=False):
         """
         Add delta to value in the cache. If the key does not exist, raise a
-        ValueError exception.
+        ValueError exception. if ignore_key_check=True then the key will be
+        created and set to the delta value by default.
         """
-        return self._incr(key=key, delta=delta, version=version, client=client)
+        return self._incr(key=key, delta=delta, version=version, client=client, ignore_key_check=ignore_key_check)
 
     def decr(self, key, delta=1, version=None, client=None):
         """
@@ -396,7 +453,16 @@ class DefaultClient(object):
             return 0
 
         t = client.ttl(key)
-        return (t >= 0 and t or None)
+
+        if t >= 0:
+            return t
+        elif t == -1:
+            return None
+        elif t == -2:
+            return 0
+        else:
+            # Should never reach here
+            return None
 
     def has_key(self, key, version=None, client=None):
         """
@@ -408,7 +474,7 @@ class DefaultClient(object):
 
         key = self.make_key(key, version=version)
         try:
-            return client.exists(key)
+            return client.exists(key) == 1
         except _main_exceptions as e:
             raise ConnectionInterrupted(connection=client, parent=e)
 
@@ -421,7 +487,7 @@ class DefaultClient(object):
         if client is None:
             client = self.get_client(write=False)
 
-        pattern = self.make_key(search, version=version)
+        pattern = self.make_pattern(search, version=version)
         for item in client.scan_iter(match=pattern, count=itersize):
             item = smart_text(item)
             yield self.reverse_key(item)
@@ -437,20 +503,54 @@ class DefaultClient(object):
         if client is None:
             client = self.get_client(write=False)
 
-        pattern = self.make_key(search, version=version)
+        pattern = self.make_pattern(search, version=version)
         try:
             encoding_map = [smart_text(k) for k in client.keys(pattern)]
             return [self.reverse_key(k) for k in encoding_map]
         except _main_exceptions as e:
             raise ConnectionInterrupted(connection=client, parent=e)
 
-    def make_key(self, key, version=None):
+    def make_key(self, key, version=None, prefix=None):
         if isinstance(key, CacheKey):
             return key
-        return CacheKey(self._backend.make_key(key, version))
+
+        if prefix is None:
+            prefix = self._backend.key_prefix
+
+        if version is None:
+            version = self._backend.version
+
+        return CacheKey(self._backend.key_func(key, prefix, version))
+
+    def make_pattern(self, pattern, version=None, prefix=None):
+        if isinstance(pattern, CacheKey):
+            return pattern
+
+        if prefix is None:
+            prefix = self._backend.key_prefix
+        prefix = glob_escape(prefix)
+
+        if version is None:
+            version = self._backend.version
+        version = glob_escape(str(version))
+
+        return CacheKey(self._backend.key_func(pattern, prefix, version))
 
     def close(self, **kwargs):
         if getattr(settings, "DJANGO_REDIS_CLOSE_CONNECTION", False):
-            for c in self.client.connection_pool._available_connections:
-                c.disconnect()
-            del self._client
+            for i in range(len(self._clients)):
+                for c in self._clients[i].connection_pool._available_connections:
+                    c.disconnect()
+                self._clients[i] = None
+
+    def touch(self, key, timeout=DEFAULT_TIMEOUT, version=None, client=None):
+        """
+        Sets a new expiration for a key.
+        """
+
+        if client is None:
+            client = self.get_client(write=True)
+
+        key = self.make_key(key, version=version)
+
+        return client.expire(key, timeout)

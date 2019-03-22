@@ -1,36 +1,118 @@
+dist: xenial
+sudo: false
 language: python
-
-python:
-  - "3.4"
-  - "3.3"
-  - "2.7"
-
-env:
-  - DJANGO="django==1.8.2"
-  - DJANGO="django==1.7.8"
-  - DJANGO="django==1.6.11"
-  - DJANGO="django==1.5.12"
-  - DJANGO="django==1.4.20"
+cache: pip
 
 matrix:
-  exclude:
-    - python: "3.3"
-      env: DJANGO="django==1.4.20"
-    - python: "3.4"
-      env: DJANGO="django==1.4.20"
-
+  include:
+    - python: 2.7
+      env: TOXENV=py27-django111-redis2
+    - python: 2.7
+      env: TOXENV=py27-django111-redislatest
+    - python: 2.7
+      env: TOXENV=py27-django111-redismaster
+    - python: 3.4
+      env: TOXENV=py34-django111-redis2
+    - python: 3.4
+      env: TOXENV=py34-django111-redislatest
+    - python: 3.4
+      env: TOXENV=py34-django111-redismaster
+    - python: 3.5
+      env: TOXENV=py35-django111-redis2
+    - python: 3.5
+      env: TOXENV=py35-django111-redislatest
+    - python: 3.5
+      env: TOXENV=py35-django111-redismaster
+    - python: 3.6
+      env: TOXENV=py36-django111-redis2
+    - python: 3.6
+      env: TOXENV=py36-django111-redislatest
+    - python: 3.6
+      env: TOXENV=py36-django111-redismaster
+    - python: 3.4
+      env: TOXENV=py34-django20-redis2
+    - python: 3.4
+      env: TOXENV=py34-django20-redislatest
+    - python: 3.4
+      env: TOXENV=py34-django20-redismaster
+    - python: 3.5
+      env: TOXENV=py35-django20-redis2
+    - python: 3.5
+      env: TOXENV=py35-django20-redislatest
+    - python: 3.5
+      env: TOXENV=py35-django20-redismaster
+    - python: 3.6
+      env: TOXENV=py36-django20-redis2
+    - python: 3.6
+      env: TOXENV=py36-django20-redislatest
+    - python: 3.6
+      env: TOXENV=py36-django20-redismaster
+    - python: 3.7
+      env: TOXENV=py37-django20-redis2
+    - python: 3.7
+      env: TOXENV=py37-django20-redislatest
+    - python: 3.7
+      env: TOXENV=py37-django20-redismaster
+    - python: 3.5
+      env: TOXENV=py35-django21-redis2
+    - python: 3.5
+      env: TOXENV=py35-django21-redislatest
+    - python: 3.5
+      env: TOXENV=py35-django21-redismaster
+    - python: 3.6
+      env: TOXENV=py36-django21-redis2
+    - python: 3.6
+      env: TOXENV=py36-django21-redislatest
+    - python: 3.6
+      env: TOXENV=py36-django21-redismaster
+    - python: 3.7
+      env: TOXENV=py37-django21-redis2
+    - python: 3.7
+      env: TOXENV=py37-django21-redislatest
+    - python: 3.7
+      env: TOXENV=py37-django21-redismaster
+    - python: 3.5
+      env: TOXENV=py35-django22-redis2
+    - python: 3.5
+      env: TOXENV=py35-django22-redislatest
+    - python: 3.5
+      env: TOXENV=py35-django22-redismaster
+    - python: 3.6
+      env: TOXENV=py36-django22-redis2
+    - python: 3.6
+      env: TOXENV=py36-django22-redislatest
+    - python: 3.6
+      env: TOXENV=py36-django22-redismaster
+    - python: 3.7
+      env: TOXENV=py37-django22-redis2
+    - python: 3.7
+      env: TOXENV=py37-django22-redislatest
+    - python: 3.7
+      env: TOXENV=py37-django22-redismaster
+    - python: 3.5
+      env: TOXENV=py35-djangomaster-redis2
+    - python: 3.5
+      env: TOXENV=py35-djangomaster-redislatest
+    - python: 3.5
+      env: TOXENV=py35-djangomaster-redismaster
+    - python: 3.6
+      env: TOXENV=py36-djangomaster-redis2
+    - python: 3.6
+      env: TOXENV=py36-djangomaster-redislatest
+    - python: 3.6
+      env: TOXENV=py36-djangomaster-redismaster
+    - python: 3.7
+      env: TOXENV=py37-djangomaster-redis2
+    - python: 3.7
+      env: TOXENV=py37-djangomaster-redislatest
+    - python: 3.7
+      env: TOXENV=py37-djangomaster-redismaster
+    - env: TOXENV=lint
 install:
-  - pip install $DJANGO --use-mirrors
-  - pip install redis==2.10.3 --use-mirrors
-  - pip install mock==1.0.1
-  - pip install msgpack-python>=0.4.6
+  - pip install tox
 
 script:
-  - (cd tests && python runtests.py)
-  - (cd tests && python runtests-sharded.py)
-  - (cd tests && python runtests-herd.py)
-  - (cd tests && python runtests-json.py)
-  - (cd tests && python runtests-msgpack.py)
+  - tox
 
 services:
   - redis-server

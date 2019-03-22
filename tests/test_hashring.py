@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 
-from django.test import TestCase
+import unittest
 
 from django_redis.hash_ring import HashRing
 
@@ -16,7 +16,7 @@ class Node(object):
         return "<Node {}>".format(self.id)
 
 
-class HashRingTest(TestCase):
+class HashRingTest(unittest.TestCase):
     def setUp(self):
         self.node0 = Node(0)
         self.node1 = Node(1)
@@ -36,4 +36,4 @@ class HashRingTest(TestCase):
 
     def test_hashring_brute_force(self):
         for key in ("test{0}".format(x) for x in range(10000)):
-            node = self.ring.get_node(key)
+            self.ring.get_node(key)

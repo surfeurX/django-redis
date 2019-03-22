@@ -1,6 +1,153 @@
 Changelog
 =========
 
+Version 4.10.0
+--------------
+
+Date: 2018-10-19
+
+- Add support and testing for Django 2.1 and Python 3.7. No actual code changes
+  were required.
+- Add support for redis-py 3.0.
+- Add touch command.
+
+
+Version 4.9.1
+-------------
+
+Date: 2018-10-19
+
+- Pin redis version to 2.10.6
+
+
+Version 4.9.0
+-------------
+
+Date: 2018-03-01
+
+- Add testing and support for Django 2.0. No actual code changes were required.
+- Escape `KEY_PREFIX` and `VERSION` when used in glob expressions.
+- Improve handling timeouts less than 1ms.
+- Remove fakeredis support.
+- Add datetime, date, time, and timedelta serialization support to the JSON
+  serializer.
+- The deprecated feature of passing `True` as a timeout value is no longer
+  supported.
+- Fix `add()` with a negative timeout to not store key (it is immediately
+  invalid).
+- Remove support for Django < 1.11.
+- Add support for atomic incr if key is not set.
+
+
+Version 4.8.0
+-------------
+
+Date: 2017-04-25
+
+- Drop deprecated exception with typo ConnectionInterrumped. Use
+  ConnectionInterrupted instead.
+- Remove many workarounds related to old and not supported versions
+  of django and redis-py.
+- Code cleaning and flake8 compliance fixes.
+- Add better impl for `close` method.
+- Fix compatibility warnings with python 3.6
+
+
+Version 4.7.0
+-------------
+
+Date: 2017-01-02
+
+- Add the ability to enable write to slave when master is not available.
+- Add `itersize` parameter to `delete_pattern`.
+
+
+Version 4.6.0
+-------------
+
+Date: 2016-11-02
+
+- Fix incorrect behavior of `clear()` method.
+
+
+Version 4.5.0
+-------------
+
+Date: 2016-09-21
+
+- Now only support Django 1.8 and above. Support for older versions has been dropped.
+- Remove undocumented and deprecated support for old connection string format.
+- Add support for `PASSWORD` option (useful when the password contains url unsafe
+  characters).
+- Make the package compatible with fake redis.
+- Fix compatibility issues with latest django version (1.10).
+
+
+Version 4.4.4
+-------------
+
+Date: 2016-07-25
+
+- Fix possible race condition on incr implementation using
+  lua script (thanks to @prokaktus).
+
+
+Version 4.4.3
+-------------
+
+Date: 2016-05-17
+
+- Fix minor ttl inconsistencies.
+
+
+Version 4.4.2
+-------------
+
+Date: 2016-04-21
+
+- Fix timeout bug (thanks to @skorokithakis)
+
+
+Version 4.4.1
+-------------
+
+Date: 2016-04-13
+
+- Add additional check for avoid wrong exception on `get_redis_connection`.
+
+
+Version 4.4.0
+-------------
+
+Date: 2016-04-12
+
+- Make redis client pluggable (thanks to @arnuschky)
+- Add version number inside python module (thanks to @BertrandBordage)
+- Fix clear method (thanks to @ostcar)
+- Add the ability to specify key prefix on delete and delete_pattern.
+- BREAKING CHANGE: improved compression support (make it more plugable).
+
+
+Version 4.3.0
+-------------
+
+Date: 2015-10-31
+
+- Improved exception handling in herd client (thanks to @brandoshmando)
+- Fix bug that not allows use generators on delete_many (thanks to @ostcar).
+- Remove obsolete code that makes hard dependency to mspack.
+
+
+Version 4.2.0
+-------------
+
+Date: 2015-07-03
+
+- Add `persist` and `expire` methods.
+- Remove old and broken dummy client.
+- Expose a redis lock method.
+
+
 Version 4.1.0
 -------------
 
@@ -246,4 +393,3 @@ Version 2.1
 
 - Many bug fixes.
 - Client side sharding.
-
